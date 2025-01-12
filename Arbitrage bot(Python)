@@ -1,0 +1,152 @@
+import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import logging
+import os
+
+logging.basicConfig(filename='arbitrage_bot.log', level=logging.INFO)
+
+# Load credentials from environment variables
+API_KEY = os.environ.get('API_key') #put api key here
+EMAIL_ADDRESS = os.environ.get('Your_Email') #put your email here
+EMAIL_PASSWORD = os.environ.get('Your email password') #you may have to make a google password key to do this, but put you password here or if needed then the passkey 
+RECIPIENT_EMAIL = os.environ.get('Your_email') #put your email that you want to send it to here
+
+BASE_URL = "https://api.the-odds-api.com/v4/sports"
+SPORTS = [
+    "basketball_nba", "americanfootball_nfl",
+    "soccer_epl", "baseball_mlb", "basketball_ncaab", "americanfootball_ncaaf"
+]
+REGIONS = "us"
+MARKETS = "h2h"
+ODDS_FORMAT = "decimal"
+
+def fetch_odds(sport):
+    url = f"{BASE_URL}/{sport}/odds"
+    params = {
+        "apiKey": API_KEY,
+        "regions": REGIONS,
+        "markets": MARKETS,
+        "oddsFormat": ODDS_FORMAT
+    }
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()  # Raise exception for unsuccessful requests
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to fetch odds for {sport}: {e}")
+        return None
+
+def calculate_arbitrage(odds):
+    implied_probs = [1 / odd for odd in odds]
+    total_prob = sum(implied_probs)
+    if total_prob < 1:
+        profit_margin = 1 - total_prob
+        return True, profit_margin
+    return False, 0
+
+def send_email(subject, body):
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_ADDRESS
+        msg["To"] = RECIPIENT_EMAIL
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+
+        print("Email sent successfully!")
+    except Exception as e:
+        print("Failed to send email:", e)
+
+def find_arbitrage(odds_data, sport):
+    arbitrage_opportunities = []
+    for game in odds_data:
+        try:
+            teams = game["home_team"], game["away_team"]
+            game_date = game["commence_time"]
+            game_key = (teams, game_date)
+
+            if game_key in sent_opportunities:
+                continue  
+
+            bookmakers = game["bookmakers"]
+
+            #extracts odds from sportsbooks
+            best_odds = {}
+            best_bookmakers = {}
+            for bookmaker in bookmakers:
+                for market in bookmaker["markets"]:
+                    if market["key"] == "h2h":
+                        for outcome in market["outcomes"]:
+                            team = outcome["name"]
+                            odd = outcome["price"]
+                            if team not in best_odds or odd > best_odds[team]:
+                                best_odds[team] = odd
+                                best_bookmakers[team] = bookmaker["title"]
+            
+            # Check for arbitrage opportunmnities
+            if len(best_odds) == 2:
+                odds_list = list(best_odds.values())
+                is_arbitrage, profit = calculate_arbitrage(odds_list)
+
+                # Calculates probability
+                implied_probs = [1 / odd for odd in odds_list]
+                winning_team_index = implied_probs.index(max(implied_probs)) 
+
+                # Calculates expected return 
+                return_amount = 10 * odds_list[winning_team_index] 
+
+                # Check if return exceeds initial investment of $20, basically if you invest 10 on each team, it checks to make sure you'll get your 20 dollars back atleast.
+                if is_arbitrage and return_amount >= 20: 
+                    opportunity = {
+                        "teams": teams,
+                        "odds": best_odds,
+                        "bookmakers": best_bookmakers,
+                        "profit_margin": profit,
+                        "game_date": game_date,
+                        "payout": return_amount  # Use return_amount for guaranteed profit
+                    }
+                    arbitrage_opportunities.append(opportunity)
+
+                    # Send emails
+                    subject = "Arbitrage Opportunity Found!"
+                    body = (
+                        f"Sport: {sport}\n"
+                        f"Game: {opportunity['teams'][0]} vs {opportunity['teams'][1]}\n"
+                        f"Game Date: {opportunity['game_date']}\n"
+                        f"Odds:\n"
+                        f"  - {opportunity['teams'][0]}: {opportunity['odds'][opportunity['teams'][0]]} "
+                        f"({opportunity['bookmakers'][opportunity['teams'][0]]})\n"
+                        f"  - {opportunity['teams'][1]}: {opportunity['odds'][opportunity['teams'][1]]} "
+                        f"({opportunity['bookmakers'][opportunity['teams'][1]]})\n"
+                        f"Profit Margin: {opportunity['profit_margin']:.2%}\n"
+                        f"Potential Payout (for $20 bet): ${opportunity['payout']:.2f}\n"
+                    )
+                    send_email(subject, body)
+
+                    # Add this game to the sent opportunities set
+                    sent_opportunities.add(game_key)
+
+        except KeyError:
+            print("Error processing game:", game)
+
+    return arbitrage_opportunities
+
+def main():
+    for sport in SPORTS:
+        logging.info(f"Fetching odds for {sport}...")
+        odds_data = fetch_odds(sport)
+        if odds_data:
+            logging.info(f"Fetched {len(odds_data)} games for {sport}.")
+            logging.info("Searching for arbitrage opportunities...")
+            find_arbitrage(odds_data, sport)
+        else:
+            logging.info(f"Failed to fetch odds for {sport}.")
+
+if __name__ == "__main__":
+    main()
